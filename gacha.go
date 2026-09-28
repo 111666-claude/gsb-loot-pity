@@ -1,5 +1,4 @@
 // Package gacha 是抽卡池：基础概率、软保底曲线、硬保底与跨会话的保底进度。
-// 缺陷：软保底从第 75 抽才开始（差一）、出稀有后不清零保底、跨会话只保存总抽数丢掉保底进度。
 package gacha
 
 import (
@@ -43,14 +42,14 @@ func (p *Pool) State() State {
 	return p.state
 }
 
-// RateAt 返回「已经垫了 pity 抽之后，下一抽」的稀有概率。
-// 缺陷：软保底写成 pity > SoftAt，第 74 抽享受不到提升。
+// RateAt 返回第 pity 抽（已经垫了 pity-1 抽）的稀有概率。
+// 第 1..73 抽是基础概率，第 74 抽起每抽 +SoftStep，第 90 抽必出。
 func (p *Pool) RateAt(pity int) float64 {
 	if pity >= HardAt {
 		return 1
 	}
-	if pity > SoftAt {
-		rate := BaseRate + float64(pity-SoftAt)*SoftStep
+	if pity >= SoftAt {
+		rate := BaseRate + float64(pity-SoftAt+1)*SoftStep
 		if rate > 1 {
 			return 1
 		}
@@ -59,40 +58,47 @@ func (p *Pool) RateAt(pity int) float64 {
 	return BaseRate
 }
 
-// Draw 抽一次，返回是否出稀有与本抽的保底计数。
-// 缺陷：出稀有后忘了把 Pity 清零。
+// Draw 抽一次，返回是否出稀有与本抽的保底计数（出稀有前的垫刀数）。
+// 出稀有后保底计数清零，Total 只增不减。
 func (p *Pool) Draw() (bool, int) {
 	p.state.Pity++
 	p.state.Total++
-	if p.rng.Float64() < p.RateAt(p.state.Pity) {
-		pity := p.state.Pity
+	pity := p.state.Pity
+	if p.rng.Float64() < p.RateAt(pity) {
+		p.state.Pity = 0
 		return true, pity
 	}
-	return false, p.state.Pity
+	return false, pity
 }
 
-// Export 导出保底存档。
-// 缺陷：只写了总抽数，保底进度丢掉。
+// Export 导出保底存档（含保底进度与总抽数）。
 func (p *Pool) Export() string {
-	return fmt.Sprintf("total=%d", p.state.Total)
+	return fmt.Sprintf("total=%d;pity=%d", p.state.Total, p.state.Pity)
 }
 
-// Import 恢复保底存档。
-// 缺陷：只恢复总抽数，Pity 置 0（换会话/换池后保底归零）。
+// Import 恢复保底存档，保底进度与总抽数一起还原；数据非法时报 ErrState。
 func (p *Pool) Import(data string) error {
-	total := 0
+	state := State{}
 	for _, field := range strings.Split(data, ";") {
 		key, value, found := strings.Cut(strings.TrimSpace(field), "=")
-		if !found || key != "total" {
+		if !found || (key != "total" && key != "pity") {
 			continue
 		}
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
 			return ErrState
 		}
-		total = parsed
+		switch key {
+		case "total":
+			state.Total = parsed
+		case "pity":
+			state.Pity = parsed
+		}
 	}
-	p.state = State{Total: total}
+	if state.Total < 0 || state.Pity < 0 {
+		return ErrState
+	}
+	p.state = state
 	return nil
 }
 
